@@ -1,0 +1,112 @@
+:root {
+  --bg: #0b0e13;
+  --panel: #131821;
+  --edge: #232b38;
+  --ink: #e6ebf2;
+  --dim: #9aa6b8;
+  --a: #5fd4ff;      /* BLIP */
+  --b: #ffb454;      /* TOCK */
+  --ok: #7be08a;
+  --bad: #ff7a7a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); }
+body {
+  font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+           env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { margin: 0; font-size: 1.9rem; letter-spacing: .12em; text-transform: uppercase; }
+.tag { margin: 4px 0 20px; color: var(--dim); }
+h3 { font-size: .85rem; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 28px 0 8px; }
+a { color: var(--a); }
+
+.stage { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.droid {
+  background: var(--panel); border: 1px solid var(--edge); border-radius: 12px;
+  padding: 16px; min-height: 150px; transition: border-color .15s, box-shadow .15s, opacity .2s;
+}
+.droid h2 { margin: 10px 0 6px; font-size: 1.1rem; letter-spacing: .1em; }
+.droid .who { font-size: .7rem; color: var(--dim); letter-spacing: .08em; margin-left: 6px; }
+.droid[data-voice="A"] { --c: var(--a); }
+.droid[data-voice="B"] { --c: var(--b); }
+.droid h2 { color: var(--c); }
+.droid.away { opacity: .55; }
+.droid.away .who::after { content: " · on the other device"; }
+.droid.talking { border-color: var(--c); box-shadow: 0 0 0 1px var(--c), 0 0 28px -8px var(--c); }
+.droid.thinking .line::after { content: "…"; animation: blink 1s steps(2) infinite; }
+.line { margin: 0; min-height: 3em; overflow-wrap: anywhere; }
+.eye {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 2px solid var(--c); position: relative;
+}
+.eye::after {
+  content: ""; position: absolute; inset: 8px; border-radius: 50%;
+  background: var(--c); opacity: .25; transition: opacity .1s;
+}
+.droid.talking .eye::after { opacity: 1; animation: pulse .22s ease-in-out infinite alternate; }
+.droid.thinking .eye::after { opacity: .6; animation: blink 1s steps(2) infinite; }
+@keyframes pulse { from { transform: scale(.55); } to { transform: scale(1.15); } }
+@keyframes blink { 50% { opacity: .15; } }
+
+#scope {
+  display: block; width: 100%; height: 90px; margin: 12px 0;
+  background: var(--panel); border: 1px solid var(--edge); border-radius: 12px;
+}
+
+#controls {
+  display: grid; grid-template-columns: 2fr 1fr; gap: 12px 12px; align-items: end;
+  background: var(--panel); border: 1px solid var(--edge); border-radius: 12px; padding: 16px;
+}
+label { display: block; font-size: .8rem; color: var(--dim); }
+label.wide, label.check, #go { grid-column: 1 / -1; }
+label.check { display: flex; gap: 10px; align-items: flex-start; font-size: .85rem; }
+label.check input { margin-top: 3px; width: 18px; height: 18px; flex: none; }
+.opt { opacity: .7; }
+select, input[type="text"] {
+  display: block; width: 100%; margin-top: 4px; padding: 10px;
+  font: inherit; font-size: 16px; /* 16px stops iOS zooming on focus */
+  color: var(--ink); background: var(--bg);
+  border: 1px solid var(--edge); border-radius: 8px;
+}
+button {
+  font: inherit; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  padding: 14px; border-radius: 10px; border: 1px solid var(--a);
+  color: var(--bg); background: var(--a); cursor: pointer;
+}
+button.stop { background: transparent; color: var(--bad); border-color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+#status { margin: 14px 2px 0; color: var(--dim); min-height: 1.5em; }
+#status.bad { color: var(--bad); }
+#status.ok { color: var(--ok); }
+
+#log { list-style: none; margin: 0; padding: 0; }
+#log li {
+  display: grid; grid-template-columns: 4.5em 1fr 1.5em; gap: 8px;
+  padding: 8px 4px; border-bottom: 1px solid var(--edge);
+}
+#log .name { font-weight: 700; }
+#log li[data-voice="A"] .name { color: var(--a); }
+#log li[data-voice="B"] .name { color: var(--b); }
+#log .text { overflow-wrap: anywhere; }
+#log .tick { color: var(--ok); visibility: hidden; }
+#log li.decoded .tick { visibility: visible; }
+#log li.sys { display: block; color: var(--dim); font-size: .85rem; }
+.tick { color: var(--ok); }
+
+details { margin-top: 28px; color: var(--dim); }
+details summary { cursor: pointer; color: var(--ink); }
+
+@media (max-width: 560px) {
+  .stage { grid-template-columns: 1fr; }
+  #controls { grid-template-columns: 1fr 1fr; }
+  .droid { min-height: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .droid.talking .eye::after, .droid.thinking .eye::after,
+  .droid.thinking .line::after { animation: none; }
+}

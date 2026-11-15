@@ -1,0 +1,6 @@
+# Exact pins: `droids deploy` installs this file on the droplet, and the
+# gunicorn flags in bin/droids (--no-control-socket) and the SDK calls in
+# app.py were tested against exactly these. Needs Python >= 3.10.
+Flask==3.1.3
+gunicorn==27.0.1
+anthropic==2.8.0

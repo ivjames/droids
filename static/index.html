@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Droid Talk</title>
+<meta name="description" content="Two AI agents talking to each other in chirps and beeps — data over sound, with subtitles.">
+<meta name="theme-color" content="#0b0e13">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>Droid Talk</h1>
+    <p class="tag">Two AI agents, one acoustic data link. The beeps <em>are</em> the conversation.</p>
+  </header>
+
+  <section class="stage" aria-label="The droids">
+    <article class="droid" id="droid-A" data-voice="A">
+      <div class="eye" aria-hidden="true"></div>
+      <h2>BLIP <span class="who">droid A</span></h2>
+      <p class="line" aria-live="polite"></p>
+    </article>
+    <article class="droid" id="droid-B" data-voice="B">
+      <div class="eye" aria-hidden="true"></div>
+      <h2>TOCK <span class="who">droid B</span></h2>
+      <p class="line" aria-live="polite"></p>
+    </article>
+  </section>
+
+  <canvas id="scope" width="900" height="120" aria-hidden="true"></canvas>
+
+  <form id="controls" autocomplete="off">
+    <label>This device plays
+      <select id="role">
+        <option value="both">both droids (one device)</option>
+        <option value="A">BLIP — droid A (speaks first)</option>
+        <option value="B">TOCK — droid B (answers)</option>
+      </select>
+    </label>
+    <label>Lines each
+      <select id="turns">
+        <option value="3">3</option>
+        <option value="6" selected>6</option>
+        <option value="10">10</option>
+      </select>
+    </label>
+    <label class="wide">Subject <span class="opt">(optional)</span>
+      <input id="topic" type="text" maxlength="80" placeholder="e.g. the humans, oil baths, the weather on Tatooine">
+    </label>
+    <label class="check"><input id="loopback" type="checkbox">
+      No microphone — wire the speaker straight into the decoder</label>
+    <button id="go" type="submit">Start</button>
+  </form>
+
+  <p id="status" role="status">Loading the modem…</p>
+
+  <section aria-label="Subtitles">
+    <h3>Subtitles</h3>
+    <ol id="log"></ol>
+  </section>
+
+  <details>
+    <summary>How this works</summary>
+    <p>Each droid's line is written by an AI model, encoded with
+      <a href="https://github.com/ggerganov/ggwave" rel="noopener">ggwave</a>
+      into a burst of tones, and played through the speaker. The other droid
+      hears it through the microphone, decodes the tones back into text, asks
+      the model for a reply, and chirps that back. A subtitle with a
+      <span class="tick">✓</span> was decoded from sound, not passed along
+      behind the scenes.</p>
+    <p>BLIP and TOCK use different ggwave protocols, played at different
+      speeds, so they sound like two different machines. Both are slowed down
+      on purpose: this is theatre, not networking.</p>
+    <p><strong>Two devices</strong> is the better show: pick BLIP on one and
+      TOCK on the other, turn the volume up, press Start on TOCK first, then
+      on BLIP. One device playing both also works if its microphone can hear
+      its own speaker.</p>
+  </details>
+</main>
+<script src="vendor/ggwave.js"></script>
+<script src="droid.js"></script>
+</body>
+</html>
