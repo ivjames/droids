@@ -34,6 +34,12 @@
     B: { name: 'TOCK', proto: 'GGWAVE_PROTOCOL_DT_FASTEST', rate: 0.7,
          flourish: [660, 440, 330] },
   };
+  // The speed control multiplies both voices' rates. A sender may use any of
+  // these and change between bursts: a receiver runs one decoder per voice
+  // per speed, and only the one matching what was played ever produces
+  // anything (checked for all 36 sender/listener pairings), so the two ends
+  // never have to agree on a setting.
+  const SPEEDS = { slow: 0.75, normal: 1, fast: 1.25 };
   const other = (id) => (id === 'A' ? 'B' : 'A');
 
   // Control frames. '~' is stripped from everything the model says, so a
@@ -67,27 +73,47 @@
   // Radio
   // -------------------------------------------------------------------------
 
-  /* Streaming linear resampler + ggwave decoder for ONE voice. Captured audio
+  /* ggwave allows four instances per loaded module, and a receiver that
+   * listens for both voices at every speed needs seven with its transmitter.
+   * Each call to the factory is a separate module with its own four, so the
+   * pool just loads another when the ones it has are full. */
+  const modem = {
+    mods: [],
+    async acquire() {
+      for (const gg of this.mods) {
+        const p = gg.getDefaultParameters();
+        p.sampleRateInp = GG_RATE;
+        p.sampleRateOut = GG_RATE;
+        const inst = gg.init(p);
+        if (inst >= 0) return { gg, inst };
+      }
+      const gg = await window.ggwave_factory();
+      if (gg.disableLog) gg.disableLog();
+      this.mods.push(gg);
+      return this.acquire();
+    },
+    release(h) { if (h) { try { h.gg.free(h.inst); } catch (_) { /* already gone */ } } },
+  };
+
+  /* Streaming linear resampler + ggwave decoder for ONE voice at ONE speed. Captured audio
    * at the device rate goes in; whenever a ggwave frame's worth has been
    * produced it is handed to the decoder. */
   class Listener {
-    constructor(gg, voiceId, deviceRate, onText) {
-      this.gg = gg;
+    constructor(handle, voiceId, speed, deviceRate, onText) {
+      this.handle = handle;
+      this.gg = handle.gg;
+      this.inst = handle.inst;
       this.voiceId = voiceId;
       this.onText = onText;
       // The sender played a 48 kHz waveform at `rate`, so one second of the
       // original occupies 1/rate seconds here. Reading the capture at this
       // step puts it back on ggwave's clock.
-      this.step = deviceRate / (GG_RATE * VOICES[voiceId].rate);
+      this.step = deviceRate / (GG_RATE * VOICES[voiceId].rate * SPEEDS[speed]);
       this.pos = 0;     // read position relative to the current chunk
       this.prev = 0;    // last sample of the previous chunk
       this.frame = new Float32Array(GG_FRAME);
       this.bytes = new Int8Array(this.frame.buffer);
       this.fill = 0;
-      const p = gg.getDefaultParameters();
-      p.sampleRateInp = GG_RATE;
-      p.sampleRateOut = GG_RATE;
-      this.inst = gg.init(p);
     }
     feed(chunk) {
       const n = chunk.length, step = this.step;
@@ -110,64 +136,102 @@
         this.onText(this.voiceId, UTF8.decode(new Uint8Array(res)));
       }
     }
-    free() { try { this.gg.free(this.inst); } catch (_) { /* already gone */ } }
+    free() { modem.release(this.handle); }
   }
 
+  const CANCELLED = Symbol('cancelled');   // open() was overtaken by close()
   const UTF8 = new TextDecoder('utf-8');
   const UTF8_ENC = new TextEncoder();
   const bytes = (str) => UTF8_ENC.encode(str).length;
 
   class Radio {
-    /* opts: { listenFor: ['A'|'B', ...], loopback: bool,
+    /* opts: { listenFor: ['A'|'B', ...], loopback: bool, speed, volume,
      *         onFrame(voiceId, text), onTxStart(voiceId, text, seconds),
      *         onTxEnd(voiceId, text) } */
-    constructor(gg, opts) {
-      this.gg = gg;
+    constructor(opts) {
       this.opts = opts;
+      this.speed = opts.speed || 'normal';   // may be changed between bursts
       this.queue = Promise.resolve();
       this.closed = false;
       this.current = null;
     }
 
+    /* 0..1. Safe to call at any time, including mid-burst. */
+    setVolume(v) {
+      this.volume = Math.max(0, Math.min(1, v));
+      if (this.out) this.out.gain.value = this.volume;
+    }
+
+    /* Opening takes several awaits (the microphone prompt, a second ggwave
+     * module, the worklet) and Stop can land during any of them. Everything
+     * acquired is released whichever side of close() it arrived on: setup()
+     * bails at the next checkpoint, and open() disposes once more on the way
+     * out to catch whatever was mid-flight. */
     async open() {
+      try {
+        await this.setup();
+      } catch (err) {
+        if (err !== CANCELLED) throw err;
+      } finally {
+        if (this.closed) this.dispose();
+      }
+    }
+
+    live() { if (this.closed) throw CANCELLED; }
+
+    async grab() {
+      const h = await modem.acquire();
+      if (this.closed) { modem.release(h); throw CANCELLED; }
+      return h;
+    }
+
+    async setup() {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       this.ctx = new Ctx();
       await this.ctx.resume();
+      this.live();
 
-      const p = this.gg.getDefaultParameters();
-      p.sampleRateInp = GG_RATE;
-      p.sampleRateOut = GG_RATE;
-      this.tx = this.gg.init(p);
+      this.txh = await this.grab();
 
+      // Everything this page plays goes through `mix`; `out` is the volume
+      // knob between it and the speaker. The scope and the no-microphone
+      // path tap `mix`, so turning the volume down changes what a listener
+      // in the room hears and nothing else.
+      this.mix = this.ctx.createGain();
       this.out = this.ctx.createGain();
-      this.out.gain.value = 0.9;
+      this.setVolume(this.opts.volume == null ? 0.9 : this.opts.volume);
+      this.mix.connect(this.out);
       this.out.connect(this.ctx.destination);
 
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 1024;
       this.analyser.smoothingTimeConstant = 0.6;
-      this.out.connect(this.analyser);
+      this.mix.connect(this.analyser);
 
       // Everything the decoders hear arrives on this bus.
       this.inBus = this.ctx.createGain();
       this.inBus.connect(this.analyser);
 
       if (this.opts.loopback) {
-        this.out.connect(this.inBus);
+        this.mix.connect(this.inBus);
       } else {
         // The browser's voice processing is built to REMOVE exactly what this
         // page needs to hear: steady tones, and its own speaker.
         this.stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         });
+        this.live();
         this.mic = this.ctx.createMediaStreamSource(this.stream);
         this.mic.connect(this.inBus);
       }
 
-      this.listeners = this.opts.listenFor.map(
-        (id) => new Listener(this.gg, id, this.ctx.sampleRate, (v, t) => {
-          if (!this.closed) this.opts.onFrame(v, t);
-        }));
+      this.listeners = [];
+      for (const id of this.opts.listenFor) {
+        for (const speed of Object.keys(SPEEDS)) {
+          this.listeners.push(new Listener(await this.grab(), id, speed, this.ctx.sampleRate,
+            (v, t) => { if (!this.closed) this.opts.onFrame(v, t); }));
+        }
+      }
 
       const hear = (data) => {
         if (this.closed) return;
@@ -186,13 +250,14 @@
       if (this.ctx.audioWorklet && window.AudioWorkletNode) {
         try {
           await this.ctx.audioWorklet.addModule('capture-worklet.js');
+          if (this.closed) throw CANCELLED;
           tap = new AudioWorkletNode(this.ctx, 'capture-tap', {
             numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1,
             channelCountMode: 'explicit', channelInterpretation: 'speakers',
           });
           tap.port.onmessage = (e) => hear(e.data);
           this.capture = 'worklet';
-        } catch (_) { tap = null; }
+        } catch (err) { if (err === CANCELLED) throw err; tap = null; }
       }
       if (!tap) {
         tap = this.ctx.createScriptProcessor(4096, 1, 1);
@@ -216,7 +281,8 @@
       if (flourish) await this.blips(v.flourish);
       if (this.closed) return;
 
-      const view = this.gg.encode(this.tx, text, this.gg.ProtocolId[v.proto], 30);
+      const gg = this.txh.gg;
+      const view = gg.encode(this.txh.inst, text, gg.ProtocolId[v.proto], 30);
       // `view` aliases the module's heap and is overwritten by the next
       // encode — copy it out before anything else touches ggwave.
       const native = new Float32Array(new Uint8Array(view).buffer);
@@ -225,7 +291,7 @@
       // gives every browser the same samples to play; a 48 kHz buffer with a
       // playbackRate in a 44.1 kHz context came out ~9% short in Chromium,
       // which no receiver can undo.
-      const step = (GG_RATE * v.rate) / this.ctx.sampleRate;
+      const step = (GG_RATE * v.rate * SPEEDS[this.speed]) / this.ctx.sampleRate;
       const n = Math.floor((native.length - 1) / step);
       const buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
       const samples = buf.getChannelData(0);
@@ -235,7 +301,7 @@
       }
       const src = this.ctx.createBufferSource();
       src.buffer = buf;
-      src.connect(this.out);
+      src.connect(this.mix);
       const seconds = buf.duration;
 
       this.opts.onTxStart(voiceId, text, seconds);
@@ -262,7 +328,7 @@
         g.gain.setValueAtTime(0, at);
         g.gain.linearRampToValueAtTime(0.25, at + 0.015);
         g.gain.linearRampToValueAtTime(0, at + 0.11);
-        osc.connect(g); g.connect(this.out);
+        osc.connect(g); g.connect(this.mix);
         osc.start(at); osc.stop(at + 0.12);
       });
       await sleep(freqs.length * 130 + 180);
@@ -274,15 +340,24 @@
       if (this.closed) return;
       this.closed = true;
       if (this.current) { try { this.current.src.stop(); } catch (_) {} this.current.resolve(); }
+      this.dispose();
+    }
+
+    /* Release everything held. Safe to call more than once: each resource is
+     * forgotten as it is released. */
+    dispose() {
       if (this.proc) {
         this.proc.onaudioprocess = null;
         if (this.proc.port) this.proc.port.onmessage = null;
-        this.proc.disconnect();
+        try { this.proc.disconnect(); } catch (_) {}
+        this.proc = null;
       }
-      if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+      if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
       (this.listeners || []).forEach((l) => l.free());
-      if (this.tx != null) { try { this.gg.free(this.tx); } catch (_) {} }
-      if (this.ctx) this.ctx.close().catch(() => {});
+      this.listeners = [];
+      modem.release(this.txh);
+      this.txh = null;
+      if (this.ctx && this.ctx.state !== 'closed') this.ctx.close().catch(() => {});
     }
   }
 
@@ -570,12 +645,12 @@
     form: $('controls'), go: $('go'), role: $('role'), turns: $('turns'),
     topic: $('topic'), loopback: $('loopback'), status: $('status'),
     log: $('log'), scope: $('scope'),
-    mode: $('mode'),
+    mode: $('mode'), speed: $('speed'), volume: $('volume'),
     talkbar: $('talkbar'), talk: $('talk'), say: $('say'), send: $('send'),
     panel: { A: $('droid-A'), B: $('droid-B') },
   };
 
-  let gg = null;        // the ggwave module, loaded once
+  let ready = false;    // the ggwave module has loaded
   let session = null;   // { radio, droids: {A?, B?}, pendingRow: {A?, B?} }
 
   function setStatus(text, kind) {
@@ -634,6 +709,10 @@
     if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return false;
     const u = new SpeechSynthesisUtterance(text);
     u.lang = SPEECH_LANG;
+    // Speech does not pass through the Web Audio graph, so the volume
+    // control has to be applied to it separately. It is read when the
+    // utterance starts; moving the slider mid-sentence affects the next one.
+    u.volume = Math.max(0, Math.min(1, els.volume.value / 100));
     window.speechSynthesis.speak(u);
     return true;
   }
@@ -737,7 +816,9 @@
       else setStatus(`${VOICES[id].name} said: ${phrase}`, 'ok');
     };
 
-    s.radio = new Radio(gg, {
+    s.radio = new Radio({
+      speed: els.speed.value,
+      volume: els.volume.value / 100,
       // Each local droid needs to hear the OTHER voice. With both droids
       // here that is both voices; with one, only the far end's. A translator
       // listens to everything, so it can also interpret two droids that are
@@ -789,6 +870,7 @@
     els.log.textContent = '';
     session = s;
     window.__droids = s;      // for the test harness and the curious
+    window.__modem = modem;
 
     return s.radio.open().then(() => {
       if (session !== s) { s.radio.close(); return; }
@@ -872,7 +954,7 @@
   els.form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (session) { endSession('Stopped.', ''); return; }
-    if (!gg) return;
+    if (!ready) return;
     els.go.textContent = 'Stop';
     els.go.classList.add('stop');
     setControlsDisabled(true);
@@ -891,13 +973,17 @@
     }
   });
 
+  // Speed and volume stay live during a session: neither needs the far end
+  // to know.
+  els.speed.addEventListener('change', () => { if (session) session.radio.speed = els.speed.value; });
+  els.volume.addEventListener('input', () => { if (session) session.radio.setVolume(els.volume.value / 100); });
   els.mode.addEventListener('change', syncControls);
   els.role.addEventListener('change', syncControls);
   els.talk.addEventListener('click', toggleTalk);
   els.talkbar.addEventListener('submit', (e) => { e.preventDefault(); sendPhrase(els.say.value); });
 
   // Controls can be preset from the URL:
-  //   ?mode=chat|translate&role=A|B|both&turns=3&topic=...&loopback=1
+  //   ?mode=chat|translate&role=A|B|both&turns=3&topic=...&speed=slow|normal|fast&volume=0-100&loopback=1
   if (['chat', 'translate'].includes(new URLSearchParams(location.search).get('mode'))) {
     els.mode.value = new URLSearchParams(location.search).get('mode');
   }
@@ -906,13 +992,15 @@
   if (['3', '6', '10'].includes(q.get('turns'))) els.turns.value = q.get('turns');
   if (q.get('topic')) els.topic.value = q.get('topic').slice(0, 80);
   if (q.get('loopback') === '1') els.loopback.checked = true;
+  if (SPEEDS[q.get('speed')]) els.speed.value = q.get('speed');
+  if (/^\d{1,3}$/.test(q.get('volume') || '')) els.volume.value = Math.min(100, +q.get('volume'));
   syncControls();
 
   els.go.disabled = true;
   (async () => {
     try {
-      gg = await window.ggwave_factory();
-      if (gg.disableLog) gg.disableLog();
+      modem.release(await modem.acquire());   // load the first module now
+      ready = true;
     } catch (err) {
       setStatus('The modem (ggwave) failed to load in this browser.', 'bad');
       return;
