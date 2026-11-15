@@ -64,6 +64,18 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
   prompts, `max_tokens` and reply length are fixed in `app.py`, never taken
   from the request; a same-origin check; and the three rate limits in
   `.env.example`. Loosening any of those is a spending decision.
+- **Translator mode adds a second spending route**, `/api/translate`, under
+  the same guards and the same rate-limit counters as `/api/chat`. The target
+  language is a code from `LANGUAGES` in `app.py`, never caller text, so
+  nothing the caller writes reaches the system prompt. The same codes are in
+  `LANGS` in `droid.js`; add a language in both or it is rejected.
+- **Speech in and out is the browser's Web Speech API**, not a server call:
+  no key, no cost, and no control over quality or availability. It could not
+  be exercised in the test browser — see README, "What has and has not been
+  tested" — so treat any claim that it works on a given device as unverified
+  until someone has tried that device.
+- **Translator frames are UTF-8 and at most 140 bytes**, ggwave's hard limit
+  (141 fails to decode). `PIECE_BYTES` in `droid.js` keeps well under it.
 - **The rate limit trusts the last `X-Forwarded-For` entry**, which is the
   address nginx saw. That is only right while nginx is the app's sole peer and
   appends to the header, as the `provision-site` vhost does.

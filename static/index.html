@@ -31,6 +31,12 @@
   <canvas id="scope" width="900" height="120" aria-hidden="true"></canvas>
 
   <form id="controls" autocomplete="off">
+    <label class="wide">Mode
+      <select id="mode">
+        <option value="chat">Droid conversation — two AIs talk to each other</option>
+        <option value="translate">Translator — you speak, the droids carry it across and say it in another language</option>
+      </select>
+    </label>
     <label>This device plays
       <select id="role">
         <option value="both">both droids (one device)</option>
@@ -38,19 +44,33 @@
         <option value="B">TOCK — droid B (answers)</option>
       </select>
     </label>
-    <label>Lines each
+    <label class="only-chat">Lines each
       <select id="turns">
         <option value="3">3</option>
         <option value="6" selected>6</option>
         <option value="10">10</option>
       </select>
     </label>
-    <label class="wide">Subject <span class="opt">(optional)</span>
+    <label class="wide only-chat">Subject <span class="opt">(optional)</span>
       <input id="topic" type="text" maxlength="80" placeholder="e.g. the humans, oil baths, the weather on Tatooine">
+    </label>
+    <label class="only-xlate" hidden>I speak
+      <select id="lang"></select>
+    </label>
+    <label class="only-xlate only-both" hidden>Say it in
+      <select id="tolang"></select>
     </label>
     <label class="check"><input id="loopback" type="checkbox">
       No microphone — wire the speaker straight into the decoder</label>
     <button id="go" type="submit">Start</button>
+  </form>
+
+  <form id="talkbar" autocomplete="off" hidden>
+    <button id="talk" type="button" disabled>Tap to talk</button>
+    <label class="wide">…or type it
+      <input id="say" type="text" maxlength="240" placeholder="Where is the nearest charging port?" disabled>
+    </label>
+    <button id="send" type="submit" disabled>Send</button>
   </form>
 
   <p id="status" role="status">Loading the modem…</p>
@@ -72,6 +92,12 @@
     <p>BLIP and TOCK use different ggwave protocols, played at different
       speeds, so they sound like two different machines. Both are slowed down
       on purpose: this is theatre, not networking.</p>
+    <p><strong>Translator mode</strong> puts a person at each end. You speak
+      (or type); your browser's speech recognition turns it into text; your
+      droid chirps the text across; the other droid decodes it, has it
+      translated, and reads it aloud in its own language. Each device picks
+      the language its human speaks. The other droid answers every burst with
+      a short chirp of its own to say it arrived.</p>
     <p><strong>Two devices</strong> is the better show: pick BLIP on one and
       TOCK on the other, turn the volume up, press Start on TOCK first, then
       on BLIP. One device playing both also works if its microphone can hear

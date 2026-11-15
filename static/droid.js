@@ -2,10 +2,13 @@
  *
  * Three layers, top to bottom of this file:
  *
- *   Radio   the modem. Turns text into ggwave tones and plays them; listens
- *           on the microphone and turns tones back into text.
- *   Droid   one agent loop. Hears a line, asks the proxy what to say, says it.
- *   UI      controls, subtitles, the scope.
+ *   Radio       the modem. Turns text into ggwave tones and plays them;
+ *               listens on the microphone and turns tones back into text.
+ *   Droid       one agent loop (conversation mode). Hears a line, asks the
+ *               proxy what to say, says it.
+ *   Translator  one relay (translator mode). Chirps what its human said;
+ *               translates and reads aloud what the other end chirped.
+ *   UI          controls, speech in and out, subtitles, the scope.
  *
  * The droids only ever reach each other through the Radio. In "both droids"
  * mode the two loops share one page, but a line still leaves through the
@@ -37,6 +40,28 @@
   // droid cannot utter one by accident.
   const HELO = '~HELO~';
   const BYE = '~BYE~';
+
+  // Translator-mode frames. A phrase is cut into pieces small enough to keep
+  // each burst short; a piece travels as  ~t <lang> <seq> <more?> <text>:
+  //   lang  two letters, the language the speaker used
+  //   seq   one digit, so a repeated frame can be told from a repeated phrase
+  //   more  '+' when another piece follows, '.' on the last
+  // and every frame is answered with ACK.
+  const ACK = '~K~';
+  const PIECE_BYTES = 64;       // text bytes per frame (ggwave's limit is 140 in all)
+  const PHRASE_CHARS = 240;
+  const ACK_WAIT_MS = 9000;
+  const ACK_TRIES = 2;
+  const XFRAME = /^~t([a-z]{2})(\d)([.+])([\s\S]*)$/;
+
+  // code: [name, BCP 47 tag for speech recognition and synthesis]. The codes
+  // must match LANGUAGES in app.py.
+  const LANGS = {
+    en: ['English', 'en-US'], es: ['Spanish', 'es-ES'], fr: ['French', 'fr-FR'],
+    de: ['German', 'de-DE'], it: ['Italian', 'it-IT'], pt: ['Portuguese', 'pt-BR'],
+    ja: ['Japanese', 'ja-JP'], zh: ['Chinese', 'zh-CN'], ko: ['Korean', 'ko-KR'],
+    hi: ['Hindi', 'hi-IN'], ar: ['Arabic', 'ar-SA'], ru: ['Russian', 'ru-RU'],
+  };
 
   const HAIL_EVERY_MS = 7000;   // re-hail interval while nobody answers
   const HAIL_TRIES = 8;
@@ -86,13 +111,17 @@
     flush() {
       const res = this.gg.decode(this.inst, this.bytes);
       if (res && res.length) {
-        let text = '';
-        for (let i = 0; i < res.length; i++) text += String.fromCharCode(res[i] & 0xff);
-        this.onText(this.voiceId, text);
+        // The payload is UTF-8 (embind encodes the JS string that way on the
+        // sending side). Copy before decoding: `res` aliases the module heap.
+        this.onText(this.voiceId, UTF8.decode(new Uint8Array(res)));
       }
     }
     free() { try { this.gg.free(this.inst); } catch (_) { /* already gone */ } }
   }
+
+  const UTF8 = new TextDecoder('utf-8');
+  const UTF8_ENC = new TextEncoder();
+  const bytes = (str) => UTF8_ENC.encode(str).length;
 
   class Radio {
     /* opts: { listenFor: ['A'|'B', ...], loopback: bool,
@@ -404,13 +433,140 @@
     }
   }
 
-  async function askProxy(role, history, topic) {
+  // -------------------------------------------------------------------------
+  // Translator — one end of a spoken relay
+  // -------------------------------------------------------------------------
+
+  /* Cut a phrase into pieces of at most `max` UTF-8 bytes whose concatenation
+   * is exactly the phrase. Breaks after a space where there is one, so words
+   * stay whole; scripts without spaces are cut between characters. */
+  function pieces(text, max) {
+    const out = [];
+    let cur = '', lastSpace = -1;
+    for (const ch of text) {
+      if (bytes(cur + ch) > max) {
+        if (lastSpace >= 0 && lastSpace < cur.length - 1) {
+          out.push(cur.slice(0, lastSpace + 1));
+          cur = cur.slice(lastSpace + 1);
+        } else {
+          out.push(cur);
+          cur = '';
+        }
+        lastSpace = cur.lastIndexOf(' ');
+      }
+      cur += ch;
+      if (ch === ' ') lastSpace = cur.length - 1;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  class Translator {
+    /* cfg: { myLang, outLang } — the language this end's human speaks, and
+     * the language incoming phrases are read aloud in (the same thing, except
+     * when one device plays both ends).
+     * hooks: { say(id, text) -> Promise, thinking(id, bool), note(text, kind),
+     *          result(id, {original, from, text, lang}) } */
+    constructor(id, cfg, hooks) {
+      this.id = id;
+      this.cfg = cfg;
+      this.hooks = hooks;
+      this.state = 'idle';
+      this.queue = [];        // frames waiting to go out
+      this.inFlight = false;  // the head of the queue is out, awaiting its ACK
+      this.tries = 0;
+      this.seq = 0;
+      this.timer = null;
+      this.parts = [];        // pieces of the phrase currently arriving
+      this.lastFrame = null;
+    }
+
+    start() { this.state = 'ready'; }
+    stop() { this.state = 'done'; clearTimeout(this.timer); }
+
+    /* The human at this end said something. */
+    send(phrase) {
+      if (this.state !== 'ready') return;
+      const cut = pieces(phrase, PIECE_BYTES);
+      cut.forEach((piece, i) => {
+        this.seq = (this.seq + 1) % 10;
+        this.queue.push(`~t${this.cfg.myLang}${this.seq}${i < cut.length - 1 ? '+' : '.'}${piece}`);
+      });
+      this.pump();
+    }
+
+    async pump() {
+      if (this.inFlight || !this.queue.length || this.state !== 'ready') return;
+      this.inFlight = true;
+      await this.hooks.say(this.id, this.queue[0]);
+      if (this.state !== 'ready' || !this.inFlight) return;
+      this.timer = setTimeout(() => {
+        this.inFlight = false;
+        if (++this.tries > ACK_TRIES) {
+          this.queue = [];
+          this.tries = 0;
+          this.hooks.note('The other droid never acknowledged — that phrase was dropped.', 'bad');
+          return;
+        }
+        this.hooks.note('No acknowledgement — sending it again.');
+        this.pump();
+      }, ACK_WAIT_MS);
+    }
+
+    /* A frame from the other end arrived over the air. */
+    async hear(text) {
+      if (this.state !== 'ready') return;
+      if (text === ACK) {
+        if (!this.inFlight) return;
+        clearTimeout(this.timer);
+        this.inFlight = false;
+        this.tries = 0;
+        this.queue.shift();
+        if (!this.queue.length) this.hooks.note('Delivered.', 'ok');
+        this.pump();
+        return;
+      }
+      const m = XFRAME.exec(text);
+      if (!m) return;
+      const [, from, , more, piece] = m;
+      // The same frame again means our ACK was lost: acknowledge it again,
+      // but do not add its text twice.
+      const repeat = text === this.lastFrame;
+      this.lastFrame = text;
+      let phrase = null;
+      if (!repeat) {
+        this.parts.push(piece);
+        if (more === '.') { phrase = this.parts.join(''); this.parts = []; }
+      }
+      const acked = this.hooks.say(this.id, ACK);
+      if (phrase === null) return;
+
+      // Translate while the acknowledgement is still chirping, then speak
+      // once it has finished — never over it.
+      this.hooks.thinking(this.id, true);
+      let out = phrase, lang = from;
+      if (from !== this.cfg.outLang) {
+        try {
+          out = await askTranslate(phrase, this.cfg.outLang);
+          lang = this.cfg.outLang;
+        } catch (err) {
+          this.hooks.note(`Could not translate (${err.message}) — reading it as it was said.`, 'bad');
+        }
+      }
+      await acked;
+      this.hooks.thinking(this.id, false);
+      if (this.state !== 'ready') return;
+      this.hooks.result(this.id, { original: phrase, from, text: out, lang });
+    }
+  }
+
+  async function postJSON(path, payload) {
     let res;
     try {
-      res = await fetch('api/chat', {
+      res = await fetch(path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role, history, topic }),
+        body: JSON.stringify(payload),
       });
     } catch (_) {
       throw new Error('the proxy is unreachable');
@@ -418,7 +574,18 @@
     let data = null;
     try { data = await res.json(); } catch (_) { /* not JSON */ }
     if (!res.ok) throw new Error((data && data.error) || `proxy error ${res.status}`);
-    const text = String((data && data.text) || '').replace(/~/g, '').trim();
+    return data || {};
+  }
+
+  async function askTranslate(text, to) {
+    const out = String((await postJSON('api/translate', { text, to })).text || '').trim();
+    if (!out) throw new Error('the proxy returned nothing');
+    return out;
+  }
+
+  async function askProxy(role, history, topic) {
+    const data = await postJSON('api/chat', { role, history, topic });
+    const text = String(data.text || '').replace(/~/g, '').trim();
     if (!text) throw new Error('the proxy returned an empty line');
     return text;
   }
@@ -434,6 +601,8 @@
     form: $('controls'), go: $('go'), role: $('role'), turns: $('turns'),
     topic: $('topic'), loopback: $('loopback'), status: $('status'),
     log: $('log'), scope: $('scope'),
+    mode: $('mode'), lang: $('lang'), tolang: $('tolang'),
+    talkbar: $('talkbar'), talk: $('talk'), say: $('say'), send: $('send'),
     panel: { A: $('droid-A'), B: $('droid-B') },
   };
 
@@ -482,19 +651,131 @@
     step();
   }
 
-  const label = (text) => (text === HELO ? '[handshake]' : text === BYE ? '[signing off]' : text);
+  const label = (text) => {
+    if (text === HELO) return '[handshake]';
+    if (text === BYE) return '[signing off]';
+    if (text === ACK) return '[received]';
+    const m = XFRAME.exec(text);
+    return m ? m[4] + (m[3] === '+' ? ' …' : '') : text;
+  };
+
+  // --- speech out -----------------------------------------------------------
+
+  function speak(text, code) {
+    if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return false;
+    const tag = (LANGS[code] || LANGS.en)[1];
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = tag;
+    // Prefer an exact regional voice, then any voice for the language; with
+    // neither, `lang` alone lets the browser choose.
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find((v) => v.lang.replace('_', '-') === tag)
+      || voices.find((v) => v.lang.slice(0, 2) === code);
+    if (voice) u.voice = voice;
+    window.speechSynthesis.speak(u);
+    return true;
+  }
+
+  /* iOS only lets a page speak if the first utterance was started by a tap.
+   * A silent one from the Start button opens the door for the ones that
+   * arrive later on their own. */
+  function unlockSpeech() {
+    if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return;
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0;
+    window.speechSynthesis.speak(u);
+  }
+
+  // --- speech in ------------------------------------------------------------
+
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let rec = null;
+
+  function stopListening() {
+    if (rec) { try { rec.abort(); } catch (_) {} }
+    rec = null;
+    els.talk.classList.remove('listening');
+    els.talk.textContent = 'Tap to talk';
+  }
+
+  function toggleTalk() {
+    if (!session || session.mode !== 'translate') return;
+    if (rec) { try { rec.stop(); } catch (_) {} return; }   // finish and send
+    if (!Recognition) {
+      setStatus('This browser has no speech recognition — type the phrase instead.', 'bad');
+      els.say.focus();
+      return;
+    }
+    const r = new Recognition();
+    r.lang = LANGS[session.talkLang][1];
+    r.interimResults = true;
+    r.maxAlternatives = 1;
+    let heard = '';
+    r.onresult = (e) => {
+      heard = '';
+      for (let i = 0; i < e.results.length; i++) heard += e.results[i][0].transcript;
+      els.say.value = heard;
+    };
+    r.onerror = (e) => {
+      const why = e.error === 'not-allowed' || e.error === 'service-not-allowed'
+        ? 'Speech recognition was refused — allow the microphone, or type the phrase.'
+        : e.error === 'no-speech' ? 'Heard nothing. Tap and try again.'
+        : `Speech recognition failed (${e.error}) — type the phrase instead.`;
+      setStatus(why, 'bad');
+    };
+    r.onend = () => {
+      if (rec !== r) return;            // aborted by Stop
+      rec = null;
+      els.talk.classList.remove('listening');
+      els.talk.textContent = 'Tap to talk';
+      if (heard.trim()) sendPhrase(heard);
+    };
+    rec = r;
+    els.talk.classList.add('listening');
+    els.talk.textContent = 'Listening… tap when done';
+    setStatus(`Listening for ${LANGS[session.talkLang][0]}…`);
+    try { r.start(); } catch (err) { rec = null; stopListening(); setStatus(`Could not start speech recognition: ${err.message}`, 'bad'); }
+  }
+
+  function sendPhrase(raw) {
+    const s = session;
+    if (!s || s.mode !== 'translate') return;
+    const phrase = String(raw).replace(/\s+/g, ' ').trim().slice(0, PHRASE_CHARS);
+    if (!phrase) return;
+    els.say.value = '';
+    setStatus('Chirping it across…');
+    s.droids[s.talker].send(phrase);
+  }
 
   function startSession() {
     const role = els.role.value;
     const local = role === 'both' ? ['A', 'B'] : [role];
+    const mode = els.mode.value;
     const cfg = { linesEach: parseInt(els.turns.value, 10) || 6, topic: els.topic.value.trim() };
-    const s = { droids: {}, pendingRow: {}, local, ended: false };
+    const s = { droids: {}, pendingRow: {}, local, ended: false, mode, spoken: [] };
+    // Translator mode: the human at this device talks through `talker`. With
+    // both droids on one device BLIP carries the phrase and TOCK reads it out
+    // in the second language.
+    s.talker = role === 'both' ? 'A' : role;
+    s.talkLang = els.lang.value;
+    const langOf = { A: els.lang.value, B: els.lang.value };
+    if (role === 'both') langOf.B = els.tolang.value;
 
     const hooks = {
       say: (id, text, opts) => s.radio.transmit(id, text, opts),
       thinking: (id, on) => els.panel[id].classList.toggle('thinking', on),
-      note: (text) => setStatus(text),
+      note: (text, kind) => setStatus(text, kind),
       done: (reason, kind) => endSession(reason, kind),
+      result: (id, r) => {
+        // A phrase arrived, was translated, and is about to be read aloud.
+        const tag = LANGS[r.lang] ? LANGS[r.lang][0] : r.lang;
+        els.panel[id].querySelector('.line').textContent = r.text;
+        const row = logLine(id, `${r.text}  (${tag})`);
+        row.classList.add('spoken');
+        s.spoken.push({ id, ...r });
+        if (!speak(r.text, r.lang)) setStatus('This browser cannot speak — read the subtitle instead.', 'bad');
+        else setStatus(`${VOICES[id].name} said it in ${tag}.`, 'ok');
+      },
     };
 
     s.radio = new Radio(gg, {
@@ -537,10 +818,19 @@
 
     return s.radio.open().then(() => {
       if (session !== s) { s.radio.close(); return; }
-      for (const id of local) s.droids[id] = new Droid(id, cfg, hooks);
+      for (const id of local) {
+        s.droids[id] = mode === 'translate'
+          ? new Translator(id, { myLang: langOf[id], outLang: langOf[id] }, hooks)
+          : new Droid(id, cfg, hooks);
+      }
       // B first, so that in one-device mode it is listening before A hails.
       if (s.droids.B) s.droids.B.start();
       if (s.droids.A) s.droids.A.start();
+      if (mode === 'translate') {
+        for (const el of [els.talk, els.say, els.send]) el.disabled = false;
+        setStatus(Recognition ? 'Ready. Tap to talk, or type a phrase.'
+          : 'Ready. This browser has no speech recognition, so type a phrase.');
+      }
       drawScope();
     });
   }
@@ -552,6 +842,9 @@
     session = null;
     Object.values(s.droids).forEach((d) => d.stop());
     s.radio.close();
+    stopListening();
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    for (const el of [els.talk, els.say, els.send]) el.disabled = true;
     for (const id of ['A', 'B']) els.panel[id].classList.remove('talking', 'thinking');
     if (reason) { setStatus(reason, kind); logNote(reason); }
     els.go.textContent = 'Start';
@@ -560,7 +853,24 @@
   }
 
   function setControlsDisabled(on) {
-    for (const el of [els.role, els.turns, els.topic, els.loopback]) el.disabled = on;
+    for (const el of [els.mode, els.role, els.turns, els.topic, els.loopback, els.lang, els.tolang]) el.disabled = on;
+  }
+
+  /* Show the controls that belong to the chosen mode and role. */
+  function syncControls() {
+    const xlate = els.mode.value === 'translate';
+    const both = els.role.value === 'both';
+    document.querySelectorAll('.only-chat').forEach((el) => { el.hidden = xlate; });
+    document.querySelectorAll('.only-xlate').forEach((el) => {
+      el.hidden = !xlate || (el.classList.contains('only-both') && !both);
+    });
+    els.talkbar.hidden = !xlate;
+    // The role labels describe a conversation; in translator mode the choice
+    // is simply which voice this device uses.
+    for (const opt of els.role.options) {
+      if (opt.value === 'A') opt.textContent = xlate ? 'BLIP — droid A' : 'BLIP — droid A (speaks first)';
+      if (opt.value === 'B') opt.textContent = xlate ? 'TOCK — droid B' : 'TOCK — droid B (answers)';
+    }
   }
 
   function drawScope() {
@@ -597,6 +907,7 @@
     els.go.classList.add('stop');
     setControlsDisabled(true);
     setStatus(els.loopback.checked ? 'Opening the audio link…' : 'Asking for the microphone…');
+    if (els.mode.value === 'translate') unlockSpeech();   // must be inside the tap
     try {
       await startSession();
     } catch (err) {
@@ -610,12 +921,29 @@
     }
   });
 
-  // Controls can be preset from the URL: ?role=A|B|both&turns=3&topic=...&loopback=1
+  for (const sel of [els.lang, els.tolang]) {
+    for (const [code, [name]] of Object.entries(LANGS)) sel.add(new Option(name, code));
+  }
+  els.lang.value = 'en';
+  els.tolang.value = 'fr';
+  els.mode.addEventListener('change', syncControls);
+  els.role.addEventListener('change', syncControls);
+  els.talk.addEventListener('click', toggleTalk);
+  els.talkbar.addEventListener('submit', (e) => { e.preventDefault(); sendPhrase(els.say.value); });
+
+  // Controls can be preset from the URL:
+  //   ?mode=chat|translate&role=A|B|both&turns=3&topic=...&lang=en&to=fr&loopback=1
+  if (['chat', 'translate'].includes(new URLSearchParams(location.search).get('mode'))) {
+    els.mode.value = new URLSearchParams(location.search).get('mode');
+  }
   const q = new URLSearchParams(location.search);
   if (['A', 'B', 'both'].includes(q.get('role'))) els.role.value = q.get('role');
   if (['3', '6', '10'].includes(q.get('turns'))) els.turns.value = q.get('turns');
   if (q.get('topic')) els.topic.value = q.get('topic').slice(0, 80);
   if (q.get('loopback') === '1') els.loopback.checked = true;
+  if (LANGS[q.get('lang')]) els.lang.value = q.get('lang');
+  if (LANGS[q.get('to')]) els.tolang.value = q.get('to');
+  syncControls();
 
   els.go.disabled = true;
   (async () => {
