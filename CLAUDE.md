@@ -89,14 +89,24 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
   decoded under half of test frames at a 44.1 kHz device rate, and Chromium
   played a 48 kHz buffer with a `playbackRate` about 9% short in a 44.1 kHz
   context. ggwave always runs at its native 48 kHz here.
-- **ggwave allows four instances at once.** The page uses at most three (one
-  transmitter, one decoder per voice it listens for) and frees them on Stop.
-  A fifth `init` returns -1 rather than throwing, and decoding through it
-  silently produces nothing.
-- **Each voice's speed is part of the protocol.** `VOICES` in `droid.js` fixes
-  the ggwave protocol and playback rate per droid, and the receiver must use
-  the same numbers. Two devices running different versions of the page will
-  not hear each other.
+- **ggwave allows four instances per loaded module**, and a fifth `init`
+  returns -1 rather than throwing. A session needs up to seven (one
+  transmitter, plus a decoder per voice listened for per speed), so `modem` in
+  `droid.js` loads a second copy of the module when the first is full. Each
+  copy reserves 16 MB of WebAssembly memory. Always take instances through
+  `modem.acquire()`; a bare `init` that returns -1 decodes nothing, silently.
+- **Voice and speed together are the protocol.** `VOICES` fixes the ggwave
+  protocol and base rate per droid, and `SPEEDS` the three multipliers. A
+  receiver listens at all three, so the two ends need not agree on a speed —
+  but they do need the same `VOICES` and `SPEEDS` tables, so two devices
+  running different versions of the page may not hear each other. Measured
+  for all 36 sender/listener pairings at 44.1 and 48 kHz: each burst was
+  decoded by its matching listener and by no other. Adding a speed adds two
+  decoders per session; adding one close to an existing multiplier risks two
+  decoders answering the same burst, so re-run that check.
+- **Volume sits after the tap.** Everything played goes through `mix`; `out`
+  is the gain between `mix` and the speaker. The scope and the no-microphone
+  path read `mix`, so the slider cannot make the page deaf to itself.
 - **The capture worklet forwards silence deliberately.** An AudioWorklet
   input with nothing playing has no channels at all rather than a channel of
   zeros, so on the no-microphone path the worklet would otherwise skip the

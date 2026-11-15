@@ -54,6 +54,16 @@
     <label class="wide only-chat">Subject <span class="opt">(optional)</span>
       <input id="topic" type="text" maxlength="80" placeholder="e.g. the humans, oil baths, the weather on Tatooine">
     </label>
+    <label>Speed
+      <select id="speed">
+        <option value="slow">slow — long, low, theatrical</option>
+        <option value="normal" selected>normal</option>
+        <option value="fast">fast — brisk and higher</option>
+      </select>
+    </label>
+    <label>Volume
+      <input id="volume" type="range" min="0" max="100" value="90">
+    </label>
     <label class="check"><input id="loopback" type="checkbox">
       No microphone — wire the speaker straight into the decoder</label>
     <button id="go" type="submit">Start</button>

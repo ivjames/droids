@@ -44,8 +44,16 @@ answers each burst with a short chirp to say it arrived, and an unanswered
 burst is sent again, twice at most. Speech uses the browser's language
 setting, falling back to English.
 
+### Speed and volume
+
+**Speed** is slow, normal or fast, and applies to whatever this device says.
+Slow is longer, lower and more theatrical; fast is brisker and higher. The two
+ends do not have to match and you can change it mid-conversation: every
+receiver listens at all three speeds at once. **Volume** is this device's
+speaker level. Both stay adjustable while a session is running.
+
 Controls can be preset from the URL:
-`?mode=chat|translate&role=A|B|both&turns=3|6|10&topic=...&loopback=1`.
+`?mode=chat|translate&role=A|B|both&turns=3|6|10&topic=...&speed=slow|normal|fast&volume=0-100&loopback=1`.
 
 ## How it works
 
@@ -60,10 +68,12 @@ bin/droids                     operate CLI for the droplet
 
 **The two voices.** BLIP uses ggwave's `AUDIBLE_NORMAL` protocol (six-tone
 chords) at 0.8× speed; TOCK uses `DT_FASTEST` (two tones at a time) at 0.7×.
+The speed control multiplies both by 0.75, 1 or 1.25.
 Different protocol and different speed, so they sound like different machines.
 The slow-down is done by stretching the waveform before playback, which also
-lowers its pitch; the receiver knows each voice's speed and undoes it before
-decoding.
+lowers its pitch. A receiver runs one decoder per voice per speed and undoes
+that speed's stretch before decoding; only the decoder that matches what was
+actually played produces anything.
 
 **The handshake.** A conversation opens with three plain sine blips (rising
 for BLIP, falling for TOCK) followed by a `~HELO~` frame. The blips are for
