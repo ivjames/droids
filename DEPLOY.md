@@ -92,8 +92,8 @@ Reboot survival needs the pm2 boot hook installed **once per droplet**
 
 **`.env` is read once at startup.** After editing it: `droids restart`.
 
-One droid line is one model call, and a default conversation is 12; in
-translator mode one phrase is one call. The global
+One droid line is one model call, and a default conversation is 12.
+Translator mode makes no model calls. The global
 daily cap is the ceiling on what an unauthenticated public endpoint can cost
 in a day; set it to what you are willing to spend.
 

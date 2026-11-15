@@ -64,16 +64,21 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
   prompts, `max_tokens` and reply length are fixed in `app.py`, never taken
   from the request; a same-origin check; and the three rate limits in
   `.env.example`. Loosening any of those is a spending decision.
-- **Translator mode adds a second spending route**, `/api/translate`, under
-  the same guards and the same rate-limit counters as `/api/chat`. The target
-  language is a code from `LANGUAGES` in `app.py`, never caller text, so
-  nothing the caller writes reaches the system prompt. The same codes are in
-  `LANGS` in `droid.js`; add a language in both or it is rejected.
+- **Translator mode never calls the proxy.** It carries the human's words
+  as they are — speech to text, text to beeps, beeps to text, text to speech —
+  so there is no model call and no cost. An earlier version translated between
+  human languages through an `/api/translate` route; that was a misreading of
+  the brief and was removed. If a model step is ever wanted here, it is a new
+  spending route and needs the same guards as `/api/chat`.
 - **Speech in and out is the browser's Web Speech API**, not a server call:
   no key, no cost, and no control over quality or availability. It could not
   be exercised in the test browser — see README, "What has and has not been
   tested" — so treat any claim that it works on a given device as unverified
   until someone has tried that device.
+- **A translator listens for both voices** (conversation droids each listen
+  for one), which is what lets it interpret two droids talking to each other.
+  Frames it sent itself are recognised and not read back, except when one
+  device plays both droids, where the read-back is the point.
 - **Translator frames are UTF-8 and at most 140 bytes**, ggwave's hard limit
   (141 fails to decode). `PIECE_BYTES` in `droid.js` keeps well under it.
 - **The rate limit trusts the last `X-Forwarded-For` entry**, which is the

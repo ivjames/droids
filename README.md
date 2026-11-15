@@ -23,23 +23,29 @@ Live at **https://droids.lab980.com** (once deployed — see `DEPLOY.md`).
 
 ### Translator mode
 
-Choose **Translator** under Mode and the droids stop inventing things and
-carry *your* words instead. Tap to talk (or type); the browser's speech
-recognition turns it into text; your droid chirps it across; the other droid
-decodes it, has the proxy translate it, and reads it aloud with the browser's
-speech synthesis.
+Choose **Translator** under Mode and the page becomes an interpreter between
+people and droids — English on one side, beeps on the other.
 
-- **Two devices:** each picks the language its own human speaks. Whatever
-  arrives is read out in that device's language.
-- **One device** (both droids): pick "I speak" and "Say it in". BLIP carries
-  the phrase, TOCK reads the translation.
+- **You → droid.** Tap to talk (or type). The browser's speech recognition
+  turns it into text and your droid says it in beeps.
+- **Droid → you.** Any beeps it hears, it decodes and reads aloud with the
+  browser's speech synthesis.
 
-A phrase is capped at 240 characters and travels in bursts of up to 64 bytes;
-TOCK or BLIP answers each burst with a short chirp to say it arrived, and an
-unanswered burst is sent again, twice at most.
+So: one on each side of a room and two people can talk to each other through
+droid-speak. Point one at a pair of droids running in conversation mode and it
+reads out what they are saying. Or choose **both droids** on one device to see
+the whole round trip: BLIP beeps your phrase, TOCK hears it, chirps a receipt,
+and reads it back.
+
+No model is involved in this mode — nothing is rewritten, only carried — so it
+makes no calls to the proxy and costs nothing. A phrase is capped at 240
+characters and travels in bursts of up to 64 bytes; the listening droid
+answers each burst with a short chirp to say it arrived, and an unanswered
+burst is sent again, twice at most. Speech uses the browser's language
+setting, falling back to English.
 
 Controls can be preset from the URL:
-`?mode=chat|translate&role=A|B|both&turns=3|6|10&topic=...&lang=en&to=fr&loopback=1`.
+`?mode=chat|translate&role=A|B|both&turns=3|6|10&topic=...&loopback=1`.
 
 ## How it works
 
@@ -69,10 +75,9 @@ last line, twice at most. A droid that hears the same line again repeats its
 previous answer instead of inventing a new one.
 
 **The proxy.** The page holds no key. `POST /api/chat` takes
-`{role, history, topic}` and returns one short line; `POST /api/translate`
-takes `{text, to}` with `to` from a fixed list of twelve languages and returns
-the translation. Speech recognition and synthesis are the browser's own
-(Web Speech API) and need no key. The model, the personas,
+`{role, history, topic}` and returns one short line. Translator mode never
+calls it: speech recognition and synthesis are the browser's own (Web Speech
+API) and need no key. The model, the personas,
 the token ceiling and the reply length are all fixed server-side; per-IP and
 whole-site rate limits bound what the public endpoint can spend
 (`.env.example`).
@@ -94,8 +99,9 @@ the full conversation in one-device mode over the no-microphone path
 (handshake, six lines, sign-off, every frame decoded from audio), with both
 the AudioWorklet capture and the ScriptProcessor fallback; and translator mode
 on the same path — a short phrase, a 121-character phrase reassembled from two
-bursts, and a phrase with accented characters, each acknowledged, translated
-and handed to speech synthesis in the right language.
+bursts (one of which was lost and resent in the test run), and a "spoken"
+phrase, each acknowledged and handed to speech synthesis; plus a translator
+overhearing a conversation-mode line and reading it out.
 
 **Not tested: real speakers and microphones, iOS Safari, and two separate
 devices.** Those need hardware. Expect to tune volume and distance; the
@@ -106,5 +112,6 @@ test browser has neither, so both were replaced with stand-ins that prove the
 page calls them correctly and nothing more. Two things in particular are
 unknown: whether a browser will run speech recognition while the page also
 holds the microphone open for the decoder (iOS Safari is the likely place for
-that to fail), and which languages a given device has voices for. Firefox has
-no speech recognition; the type-it box is the fallback there.
+that to fail), and how well a device's recogniser copes with a room full of
+beeping. Firefox has no speech recognition; the type-it box is the fallback
+there.

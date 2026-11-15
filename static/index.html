@@ -34,7 +34,7 @@
     <label class="wide">Mode
       <select id="mode">
         <option value="chat">Droid conversation — two AIs talk to each other</option>
-        <option value="translate">Translator — you speak, the droids carry it across and say it in another language</option>
+        <option value="translate">Translator — you speak, it beeps; it hears beeps, it speaks</option>
       </select>
     </label>
     <label>This device plays
@@ -53,12 +53,6 @@
     </label>
     <label class="wide only-chat">Subject <span class="opt">(optional)</span>
       <input id="topic" type="text" maxlength="80" placeholder="e.g. the humans, oil baths, the weather on Tatooine">
-    </label>
-    <label class="only-xlate" hidden>I speak
-      <select id="lang"></select>
-    </label>
-    <label class="only-xlate only-both" hidden>Say it in
-      <select id="tolang"></select>
     </label>
     <label class="check"><input id="loopback" type="checkbox">
       No microphone — wire the speaker straight into the decoder</label>
@@ -92,12 +86,11 @@
     <p>BLIP and TOCK use different ggwave protocols, played at different
       speeds, so they sound like two different machines. Both are slowed down
       on purpose: this is theatre, not networking.</p>
-    <p><strong>Translator mode</strong> puts a person at each end. You speak
-      (or type); your browser's speech recognition turns it into text; your
-      droid chirps the text across; the other droid decodes it, has it
-      translated, and reads it aloud in its own language. Each device picks
-      the language its human speaks. The other droid answers every burst with
-      a short chirp of its own to say it arrived.</p>
+    <p><strong>Translator mode</strong> turns the page into an interpreter
+      between people and droids. Speak (or type) and it says it in beeps; any
+      beeps it hears, it decodes and reads aloud. Put one on each side of a
+      room and two people can talk to each other through droid-speak, or point
+      one at a pair of chattering droids to hear what they are saying.</p>
     <p><strong>Two devices</strong> is the better show: pick BLIP on one and
       TOCK on the other, turn the volume up, press Start on TOCK first, then
       on BLIP. One device playing both also works if its microphone can hear
