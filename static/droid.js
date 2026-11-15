@@ -139,6 +139,7 @@
     free() { modem.release(this.handle); }
   }
 
+  const CANCELLED = Symbol('cancelled');   // open() was overtaken by close()
   const UTF8 = new TextDecoder('utf-8');
   const UTF8_ENC = new TextEncoder();
   const bytes = (str) => UTF8_ENC.encode(str).length;
@@ -161,12 +162,36 @@
       if (this.out) this.out.gain.value = this.volume;
     }
 
+    /* Opening takes several awaits (the microphone prompt, a second ggwave
+     * module, the worklet) and Stop can land during any of them. Everything
+     * acquired is released whichever side of close() it arrived on: setup()
+     * bails at the next checkpoint, and open() disposes once more on the way
+     * out to catch whatever was mid-flight. */
     async open() {
+      try {
+        await this.setup();
+      } catch (err) {
+        if (err !== CANCELLED) throw err;
+      } finally {
+        if (this.closed) this.dispose();
+      }
+    }
+
+    live() { if (this.closed) throw CANCELLED; }
+
+    async grab() {
+      const h = await modem.acquire();
+      if (this.closed) { modem.release(h); throw CANCELLED; }
+      return h;
+    }
+
+    async setup() {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       this.ctx = new Ctx();
       await this.ctx.resume();
+      this.live();
 
-      this.txh = await modem.acquire();
+      this.txh = await this.grab();
 
       // Everything this page plays goes through `mix`; `out` is the volume
       // knob between it and the speaker. The scope and the no-microphone
@@ -195,6 +220,7 @@
         this.stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         });
+        this.live();
         this.mic = this.ctx.createMediaStreamSource(this.stream);
         this.mic.connect(this.inBus);
       }
@@ -202,7 +228,7 @@
       this.listeners = [];
       for (const id of this.opts.listenFor) {
         for (const speed of Object.keys(SPEEDS)) {
-          this.listeners.push(new Listener(await modem.acquire(), id, speed, this.ctx.sampleRate,
+          this.listeners.push(new Listener(await this.grab(), id, speed, this.ctx.sampleRate,
             (v, t) => { if (!this.closed) this.opts.onFrame(v, t); }));
         }
       }
@@ -224,13 +250,14 @@
       if (this.ctx.audioWorklet && window.AudioWorkletNode) {
         try {
           await this.ctx.audioWorklet.addModule('capture-worklet.js');
+          if (this.closed) throw CANCELLED;
           tap = new AudioWorkletNode(this.ctx, 'capture-tap', {
             numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1,
             channelCountMode: 'explicit', channelInterpretation: 'speakers',
           });
           tap.port.onmessage = (e) => hear(e.data);
           this.capture = 'worklet';
-        } catch (_) { tap = null; }
+        } catch (err) { if (err === CANCELLED) throw err; tap = null; }
       }
       if (!tap) {
         tap = this.ctx.createScriptProcessor(4096, 1, 1);
@@ -313,15 +340,24 @@
       if (this.closed) return;
       this.closed = true;
       if (this.current) { try { this.current.src.stop(); } catch (_) {} this.current.resolve(); }
+      this.dispose();
+    }
+
+    /* Release everything held. Safe to call more than once: each resource is
+     * forgotten as it is released. */
+    dispose() {
       if (this.proc) {
         this.proc.onaudioprocess = null;
         if (this.proc.port) this.proc.port.onmessage = null;
-        this.proc.disconnect();
+        try { this.proc.disconnect(); } catch (_) {}
+        this.proc = null;
       }
-      if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+      if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
       (this.listeners || []).forEach((l) => l.free());
+      this.listeners = [];
       modem.release(this.txh);
-      if (this.ctx) this.ctx.close().catch(() => {});
+      this.txh = null;
+      if (this.ctx && this.ctx.state !== 'closed') this.ctx.close().catch(() => {});
     }
   }
 
@@ -673,6 +709,10 @@
     if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return false;
     const u = new SpeechSynthesisUtterance(text);
     u.lang = SPEECH_LANG;
+    // Speech does not pass through the Web Audio graph, so the volume
+    // control has to be applied to it separately. It is read when the
+    // utterance starts; moving the slider mid-sentence affects the next one.
+    u.volume = Math.max(0, Math.min(1, els.volume.value / 100));
     window.speechSynthesis.speak(u);
     return true;
   }
@@ -830,6 +870,7 @@
     els.log.textContent = '';
     session = s;
     window.__droids = s;      // for the test harness and the curious
+    window.__modem = modem;
 
     return s.radio.open().then(() => {
       if (session !== s) { s.radio.close(); return; }
